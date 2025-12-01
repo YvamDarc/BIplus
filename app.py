@@ -23,8 +23,8 @@ def rechercher_info_siren(siren):
         return None, "Format SIREN invalide (doit être 9 chiffres)."
 
     params = {
-        # CHANGEMENT CRUCIAL ICI : UTILISATION DU DATASET ACTUEL
-        "dataset": "sirene-open-data", 
+        # TENTATIVE CRUCIALE : Changement du nom du dataset
+        "dataset": "sirene-open-data-insee", 
         "q": f"siren:{siren}",
         "rows": 1
     }
@@ -40,8 +40,7 @@ def rechercher_info_siren(siren):
         if data and data['nhits'] > 0:
             record = data['records'][0]['fields']
             
-            # --- Les champs de l'API changent légèrement avec ce nouveau dataset ---
-            # Extraction des champs
+            # Les champs devraient rester les mêmes avec cette version
             nom_entreprise = record.get('denomination') or record.get('nom_usage')
             
             prenom = record.get('prenom_usuel', '')
@@ -50,7 +49,6 @@ def rechercher_info_siren(siren):
 
             adresse = record.get('adresse_ligne_1')
             ville_cp = f"{record.get('code_postal')} {record.get('libelle_commune')}"
-            # --- Fin des ajustements de champs ---
             
             return {
                 "siren": siren,
@@ -66,7 +64,6 @@ def rechercher_info_siren(siren):
         return None, f"Erreur HTTP: {e.response.status_code}. Vérifiez le nom du dataset ou l'URL."
     except requests.exceptions.RequestException:
         return None, "Erreur de connexion à l'API Sirene. Vérifiez votre réseau."
-
 # --- 2. FONCTION PRINCIPALE DE LA PAGE D'ACCUEIL ---
 
 def cover_page():
