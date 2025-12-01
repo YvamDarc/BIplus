@@ -38,22 +38,35 @@ with onglet1:
     # Fonction utilitaire pour lire un fichier comptable en DataFrame pandas
     def lire_fichier_comptable(file):
         filename = file.name.lower()
+
+        # Cas Excel
+        if filename.endswith(('.xlsx', '.xls')):
+            try:
+                return pd.read_excel(file)
+            except Exception as e:
+                st.error(f"Erreur lors de la lecture du fichier Excel {file.name} : {e}")
+                return None
+
+        # Cas texte : on auto-détecte le séparateur
         try:
-            # Lecture selon l'extension du fichier
-            if filename.endswith('.xlsx') or filename.endswith('.xls'):
-                df = pd.read_excel(file)
+            # Lire un petit bout pour deviner le séparateur
+            sample = file.read(4096).decode('utf-8', errors='ignore')
+            file.seek(0)
+
+            if ';' in sample:
+                sep = ';'
+            elif '|' in sample:          # très courant sur les FEC
+                sep = '|'
+            elif '\t' in sample:
+                sep = '\t'
             else:
-                # Essayer avec séparateur ';' puis ',' si nécessaire
-                try:
-                    df = pd.read_csv(file, sep=';', decimal='.', encoding='utf-8')
-                except Exception:
-                    file.seek(0)  # réinitialiser le pointeur du fichier
-                    df = pd.read_csv(file, sep=',', decimal='.', encoding='utf-8')
+                sep = ','
+
+            df = pd.read_csv(file, sep=sep, dtype=str, low_memory=False)
             return df
         except Exception as e:
-            st.error(f"Erreur lors de la lecture du fichier {file.name} : {e}")
+            st.error(f"Erreur lors de la lecture du fichier texte {file.name} : {e}")
             return None
-    
     # Chargement des fichiers pour chaque année (priorité au FEC si les deux fournis)
     df_N = None
     if fec_N is not None:
