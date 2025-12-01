@@ -1,45 +1,35 @@
 import streamlit as st
-import os
 
-st.set_page_config(page_title="BI+ FEC & SIG", layout="wide")
+st.set_page_config(page_title="BI+ – Analyse FEC & SIG", layout="centered")
 
-# -----------------------------
-# Sidebar (barre verticale)
-# -----------------------------
-st.sidebar.title("📊 BI+ – Navigation")
+def cover_page():
 
-page = st.sidebar.radio(
-    "Sélectionner une page :",
-    ["Accueil", "Données & imports", "Analyse SIG"]
-)
+    # Image de couverture
+    st.image(
+        "https://miro.medium.com/v2/resize:fit:827/1*txfLuX42exWSrKAzTJ3y5w.png",
+        caption="Analyse comptable automatisée à partir du FEC",
+        use_column_width=True
+    )
 
-# -----------------------------
-# ROUTEUR DE PAGES
-# -----------------------------
+    # Titre principal
+    st.title("📘 Bienvenue dans l'application BI+ FEC & SIG")
 
-if page == "Accueil":
-    st.title("BI+ – Tableau de bord FEC & SIG")
+    # Résumé
+    st.markdown(
+        """
+        Cette application vous permet d'analyser vos données comptables à partir du **Fichier des Écritures Comptables (FEC)**  
+        et de générer automatiquement les **Soldes Intermédiaires de Gestion (SIG)**, avec les détails par poste.
 
-    st.markdown("""
-    Bienvenue dans votre application d'analyse comptable basée sur le **FEC**.
+        ### 🌟 Fonctionnalités :
+        - Import des fichiers FEC et balances N / N-1 / N-2  
+        - Contrôle automatique de cohérence comptable  
+        - Calcul complet du **SIG** selon les normes du PCG  
+        - Détail cliquable par poste (charges externes, impôts, etc.)  
+        - Structure multi-pages propre et professionnelle  
 
-    Utilisez le menu vertical à gauche pour accéder aux pages :
-    - 📥 Données & imports  
-    - 📊 Analyse SIG  
-    """)
+        👉 Utilisez le **menu à gauche** pour accéder aux fonctionnalités.
+        """
+    )
 
-    st.info("👉 Choisissez une page dans la barre latérale à gauche.")
-
-else:
-    # Fichiers des sous-pages
-    page_files = {
-        "Données & imports": "pages/Donnees_imports.py",
-        "Analyse SIG": "pages/Analyse_SIG.py"
-    }
-
-    page_path = page_files[page]
-
-    # Charge et exécute le fichier Python de la page sélectionnée
-    with open(page_path, "r", encoding="utf-8") as f:
-        code = f.read()
-        exec(code, globals())
+if __name__ == "__main__":
+    cover_page()
