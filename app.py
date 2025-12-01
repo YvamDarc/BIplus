@@ -4,13 +4,6 @@ st.set_page_config(page_title="BI+ – Analyse FEC & SIG", layout="centered")
 
 def cover_page():
 
-    # Image de couverture
-    st.image(
-        "https://miro.medium.com/v2/resize:fit:827/1*txfLuX42exWSrKAzTJ3y5w.png",
-        caption="Analyse comptable automatisée à partir du FEC",
-        use_column_width=True
-    )
-
     # Titre principal
     st.title("📘 Bienvenue dans l'application BI+ FEC & SIG")
 
