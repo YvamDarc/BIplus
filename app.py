@@ -1,341 +1,475 @@
 import streamlit as st
 import pandas as pd
 
-# Configuration de la page
-st.set_page_config(page_title="Application SIG et Contrôle de Balance", layout="wide")
+st.set_page_config(page_title="Analyse SIG FEC", layout="wide")
 
-# Titre de l'application
-st.title("Application d'analyse financière")
+# -----------------------------
+# Utilitaires de lecture / parsing
+# -----------------------------
+def lire_fichier_fec(file):
+    """Lecture robuste d'un fichier FEC ou balance (txt/csv) avec auto-détection du séparateur."""
+    filename = file.name.lower()
 
-# Création des onglets
-onglet1, onglet2 = st.tabs(["Informations Générales & Contrôle de la Balance", "SIG (Solde Intermédiaire de Gestion)"])
+    # Excel => on lit directement
+    if filename.endswith((".xlsx", ".xls")):
+        return pd.read_excel(file)
 
-# Dictionnaire pour stocker les données chargées par année
-data_par_an = {}
+    # Fichiers texte : on détecte le séparateur
+    sample = file.read(4096).decode("utf-8", errors="ignore")
+    file.seek(0)
 
-with onglet1:
+    if ";" in sample:
+        sep = ";"
+    elif "|" in sample:
+        sep = "|"
+    elif "\t" in sample:
+        sep = "\t"
+    else:
+        sep = ","
+
+    df = pd.read_csv(file, sep=sep, dtype=str, low_memory=False)
+    return df
+
+
+def normaliser_colonnes(df):
+    """
+    Essaie d'identifier les colonnes Compte / Libellé / Débit / Crédit
+    dans un FEC ou une balance.
+    """
+    cols_norm = {c: c.lower().strip().replace(" ", "").replace("°", "") for c in df.columns}
+
+    col_compte = None
+    col_lib = None
+    col_debit = None
+    col_credit = None
+
+    for c, n in cols_norm.items():
+        if col_compte is None and any(n.startswith(x) for x in ["compte", "comptenum", "numcompte", "comptegeneral"]):
+            col_compte = c
+        if col_lib is None and any(x in n for x in ["libelle", "libellé", "intitule", "intitulé"]):
+            col_lib = c
+        if col_debit is None and n.startswith(("debit", "débit")):
+            col_debit = c
+        if col_credit is None and n.startswith(("credit", "crédit")):
+            col_credit = c
+
+    # Si pas de libellé, on en met un vide
+    if col_lib is None:
+        df["CompteLib"] = ""
+        col_lib = "CompteLib"
+
+    return col_compte, col_lib, col_debit, col_credit
+
+
+def to_float(x):
+    if pd.isna(x):
+        return 0.0
+    try:
+        return float(str(x).replace(" ", "").replace(",", "."))
+    except Exception:
+        return 0.0
+
+
+def preparer_grouped(df):
+    """
+    Retourne un DataFrame 'grouped' avec :
+    - CompteNum
+    - CompteLib
+    - Debit
+    - Credit
+    - Montant (charge > 0, produit > 0)
+    """
+    col_compte, col_lib, col_debit, col_credit = normaliser_colonnes(df)
+    if col_compte is None:
+        return None  # format non reconnu
+
+    # On s'assure que les colonnes existent
+    if col_debit is None:
+        df["_Debit"] = 0.0
+        col_debit = "_Debit"
+    if col_credit is None:
+        df["_Credit"] = 0.0
+        col_credit = "_Credit"
+
+    tmp = pd.DataFrame({
+        "CompteNum": df[col_compte].astype(str),
+        "CompteLib": df[col_lib].astype(str),
+        "Debit": df[col_debit].apply(to_float),
+        "Credit": df[col_credit].apply(to_float),
+    })
+
+    # On ne garde que les classes 6 et 7 pour le SIG (mais on pourra détailler par poste)
+    tmp = tmp[tmp["CompteNum"].str.match(r"^[1-7]")]
+    grouped = (
+        tmp.groupby(["CompteNum", "CompteLib"], dropna=False)[["Debit", "Credit"]]
+        .sum()
+        .reset_index()
+    )
+
+    # Montant "économique" : charges = Débit - Crédit, produits = Crédit - Débit
+    def montant_row(row):
+        compte = row["CompteNum"]
+        if compte.startswith("7"):
+            return row["Credit"] - row["Debit"]
+        else:
+            return row["Debit"] - row["Credit"]
+
+    grouped["Montant"] = grouped.apply(montant_row, axis=1)
+    return grouped
+
+
+# -----------------------------
+# Calcul SIG (par année)
+# -----------------------------
+def calcul_sig(grouped):
+    """Calcule les grands agrégats SIG, renvoie un dict."""
+
+    def somme_prefix(prefixes):
+        return grouped[grouped["CompteNum"].str.startswith(prefixes)]["Montant"].sum()
+
+    # Ventes & production (très simplifié)
+    ventes_marchandises = somme_prefix(("707",))
+    production_vendue = grouped[grouped["CompteNum"].str.match(r"^70(?!7)")]\
+        ["Montant"].sum()
+    production_stockee = somme_prefix(("713",))
+    production_immobilisee = somme_prefix(("72",))
+    production_exercice = production_vendue + production_stockee + production_immobilisee
+
+    chiffre_affaires = ventes_marchandises + production_exercice
+
+    # Achats consommés (achats + charges externes)
+    cout_marchandises = somme_prefix(("607", "6037", "6031"))
+    achats_mat = grouped[grouped["CompteNum"].str.match(r"^60(?!7)")]\
+        ["Montant"].sum()
+    charges_externes = somme_prefix(("61", "62"))
+    achats_consommes = cout_marchandises + achats_mat + charges_externes
+
+    marge_globale = chiffre_affaires - achats_consommes
+
+    # Charges de fonctionnement (on prend ici achats_mat + charges externes)
+    charges_fonctionnement = achats_mat + charges_externes
+
+    # Valeur ajoutée (calculée "classique" à partir de nos éléments).
+    valeur_ajoutee = marge_globale - charges_fonctionnement
+
+    subventions_expl = somme_prefix(("74",))
+    impots_taxes = somme_prefix(("63",))
+    charges_personnel = somme_prefix(("64",))
+
+    ebe = valeur_ajoutee + subventions_expl - impots_taxes - charges_personnel
+
+    transferts_charges = somme_prefix(("79", "791"))
+    reprises_provisions = somme_prefix(("78", "781"))
+
+    autres_produits_expl = somme_prefix(("75",))
+    dotations_amort = grouped[grouped["CompteNum"].str.match(r"^68(?!6|7)")]\
+        ["Montant"].sum()
+    dotations_provisions = somme_prefix(("681",))
+    autres_charges_expl = somme_prefix(("65",))
+
+    resultat_exploitation = ebe + transferts_charges + reprises_provisions \
+        + autres_produits_expl - dotations_amort - dotations_provisions - autres_charges_expl
+
+    produits_financiers = somme_prefix(("76",))
+    charges_financieres = somme_prefix(("66",))
+    resultat_financier = produits_financiers - charges_financieres
+
+    resultat_courant = resultat_exploitation + resultat_financier
+
+    produits_exceptionnels = somme_prefix(("77",))
+    charges_exceptionnelles = somme_prefix(("67",))
+    resultat_exceptionnel = produits_exceptionnels - charges_exceptionnelles
+
+    resultat_exercice = resultat_courant + resultat_exceptionnel
+
+    # CAF très simplifiée : Résultat + dotations - reprises
+    caf = resultat_exercice + dotations_amort + dotations_provisions - reprises_provisions
+
+    sig = {
+        "Chiffre d'affaires": chiffre_affaires,
+        "Ventes + Production réelle": chiffre_affaires,  # même valeur, comme ton modèle
+        "Achats consommés": -achats_consommes,  # on affiche en négatif
+        "Marge globale": marge_globale,
+        "Charges de fonctionnement": -charges_fonctionnement,
+        "Valeur ajoutée": valeur_ajoutee,
+        "Subvention de l'exploitation": subventions_expl,
+        "Impôts et taxes": -impots_taxes,
+        "Charges de personnel": -charges_personnel,
+        "Excédent brut d'exploitation": ebe,
+        "Transfert de charges": transferts_charges,
+        "Reprises sur provisions": reprises_provisions,
+        "Autres produits d'exploitation": autres_produits_expl,
+        "Dotations aux amortissements": -dotations_amort,
+        "Dotations aux provisions": -dotations_provisions,
+        "Autres charges d'exploitation": -autres_charges_expl,
+        "Résultat d'exploitation": resultat_exploitation,
+        "Résultat financier": resultat_financier,
+        "Résultat courant": resultat_courant,
+        "Résultat exceptionnel": resultat_exceptionnel,
+        "Résultat de l'exercice": resultat_exercice,
+        "Capacité d'autofinancement": caf,
+    }
+
+    return sig
+
+
+# Pour le détail par ligne : mapping "ligne SIG" -> sélecteur de comptes
+def filtre_detail(grouped, ligne):
+    """Retourne le détail des comptes contributeurs pour une ligne SIG."""
+    g = grouped.copy()
+    if ligne in ("Chiffre d'affaires", "Ventes + Production réelle"):
+        mask = g["CompteNum"].str.startswith(("70", "71", "72", "75"))
+    elif ligne == "Achats consommés":
+        mask = g["CompteNum"].str.startswith(("60", "61", "62"))
+    elif ligne == "Charges de fonctionnement":
+        mask = g["CompteNum"].str.startswith(("60", "61", "62"))
+    elif ligne == "Impôts et taxes":
+        mask = g["CompteNum"].str.startswith(("63",))
+    elif ligne == "Charges de personnel":
+        mask = g["CompteNum"].str.startswith(("64",))
+    elif ligne == "Subvention de l'exploitation":
+        mask = g["CompteNum"].str.startswith(("74",))
+    elif ligne.startswith("Dotations"):
+        mask = g["CompteNum"].str.startswith(("68", "681"))
+    elif ligne.startswith("Autres produits d'exploitation"):
+        mask = g["CompteNum"].str.startswith(("75", "78"))
+    elif ligne.startswith("Autres charges d'exploitation"):
+        mask = g["CompteNum"].str.startswith(("65",))
+    elif ligne == "Résultat financier":
+        mask = g["CompteNum"].str.startswith(("76", "66"))
+    elif ligne == "Résultat exceptionnel":
+        mask = g["CompteNum"].str.startswith(("77", "67"))
+    else:
+        # Par défaut : on montre tout 6/7
+        mask = g["CompteNum"].str.match(r"^[67]")
+    detail = g[mask].copy()
+    detail["Montant"] = detail["Montant"].round(2)
+    return detail.sort_values("CompteNum")
+
+
+def fmt(v):
+    return f"{v:,.0f} €".replace(",", " ").replace(".", ",")
+
+
+# -----------------------------
+# SESSION STATE INIT
+# -----------------------------
+if "data_par_an" not in st.session_state:
+    st.session_state["data_par_an"] = {}
+
+# -----------------------------
+# NAVIGATION (volet gauche)
+# -----------------------------
+page = st.sidebar.radio(
+    "Navigation",
+    ["Données entreprise & imports", "Analyse SIG"],
+)
+
+# -----------------------------
+# PAGE 1 : IMPORTS + CONTROLES
+# -----------------------------
+if page == "Données entreprise & imports":
     st.header("Informations sur l'entreprise")
-    # Champs de saisie pour les informations de l'entreprise
-    nom_entreprise = st.text_input("Nom de l'entreprise")
-    adresse = st.text_input("Adresse")
-    telephone = st.text_input("Téléphone")
-    email = st.text_input("Email")
-    
-    st.header("Chargement des fichiers comptables")
-    st.write("Veuillez charger les fichiers FEC ou les balances (format FEC au 31/12) pour les exercices **N**, **N-1** et **N-2**.")
-    
-    # Colonnes pour organiser les champs de chargement FEC vs Balance
+
+    col1, col2 = st.columns(2)
+    with col1:
+        nom = st.text_input("Nom de l'entreprise")
+        adresse = st.text_input("Adresse")
+    with col2:
+        telephone = st.text_input("Téléphone")
+        email = st.text_input("Email")
+
+    st.markdown("---")
+    st.subheader("Imports FEC / balances")
+
     col_fec, col_bal = st.columns(2)
     with col_fec:
-        fec_N = st.file_uploader("FEC – Année N", type=['csv', 'xlsx', 'xls', 'txt'])
-        fec_N1 = st.file_uploader("FEC – Année N-1", type=['csv', 'xlsx', 'xls', 'txt'])
-        fec_N2 = st.file_uploader("FEC – Année N-2", type=['csv', 'xlsx', 'xls', 'txt'])
+        fec_N = st.file_uploader("FEC – Année N", type=["csv", "txt", "xlsx", "xls"], key="fec_N")
+        fec_N1 = st.file_uploader("FEC – Année N-1", type=["csv", "txt", "xlsx", "xls"], key="fec_N1")
     with col_bal:
-        bal_N = st.file_uploader("Balance – Année N (optionnel)", type=['csv', 'xlsx', 'xls', 'txt'])
-        bal_N1 = st.file_uploader("Balance – Année N-1 (optionnel)", type=['csv', 'xlsx', 'xls', 'txt'])
-        bal_N2 = st.file_uploader("Balance – Année N-2 (optionnel)", type=['csv', 'xlsx', 'xls', 'txt'])
-    
-    # Fonction utilitaire pour lire un fichier comptable en DataFrame pandas
-    def lire_fichier_comptable(file):
-        filename = file.name.lower()
+        fec_N2 = st.file_uploader("FEC – Année N-2", type=["csv", "txt", "xlsx", "xls"], key="fec_N2")
 
-        # Cas Excel
-        if filename.endswith(('.xlsx', '.xls')):
-            try:
-                return pd.read_excel(file)
-            except Exception as e:
-                st.error(f"Erreur lors de la lecture du fichier Excel {file.name} : {e}")
-                return None
+    data_par_an = st.session_state["data_par_an"]
 
-        # Cas texte : on auto-détecte le séparateur
-        try:
-            # Lire un petit bout pour deviner le séparateur
-            sample = file.read(4096).decode('utf-8', errors='ignore')
-            file.seek(0)
+    def charger_fichier(label, fichier, annee):
+        if fichier is None:
+            st.info(f"{label} {annee} : aucun fichier importé.")
+            return
+        df = lire_fichier_fec(fichier)
+        if df is not None:
+            data_par_an[annee] = df
+            st.success(f"{label} {annee} importé ({len(df)} lignes).")
 
-            if ';' in sample:
-                sep = ';'
-            elif '|' in sample:          # très courant sur les FEC
-                sep = '|'
-            elif '\t' in sample:
-                sep = '\t'
-            else:
-                sep = ','
+    colN, colN1, colN2 = st.columns(3)
+    with colN:
+        charger_fichier("FEC", fec_N, "N")
+    with colN1:
+        charger_fichier("FEC", fec_N1, "N-1")
+    with colN2:
+        charger_fichier("FEC", fec_N2, "N-2")
 
-            df = pd.read_csv(file, sep=sep, dtype=str, low_memory=False)
-            return df
-        except Exception as e:
-            st.error(f"Erreur lors de la lecture du fichier texte {file.name} : {e}")
+    st.session_state["data_par_an"] = data_par_an
+
+    st.markdown("---")
+    st.subheader("Contrôle de cohérence (classes 6-7 vs 1-5)")
+
+    def controle_coherence(df):
+        col_compte, _, col_debit, col_credit = normaliser_colonnes(df)
+        if col_compte is None:
             return None
-    # Chargement des fichiers pour chaque année (priorité au FEC si les deux fournis)
-    df_N = None
-    if fec_N is not None:
-        df_N = lire_fichier_comptable(fec_N)
-    elif bal_N is not None:
-        df_N = lire_fichier_comptable(bal_N)
-    if df_N is not None:
-        data_par_an["N"] = df_N
-    
-    df_N1 = None
-    if fec_N1 is not None:
-        df_N1 = lire_fichier_comptable(fec_N1)
-    elif bal_N1 is not None:
-        df_N1 = lire_fichier_comptable(bal_N1)
-    if df_N1 is not None:
-        data_par_an["N-1"] = df_N1
-    
-    df_N2 = None
-    if fec_N2 is not None:
-        df_N2 = lire_fichier_comptable(fec_N2)
-    elif bal_N2 is not None:
-        df_N2 = lire_fichier_comptable(bal_N2)
-    if df_N2 is not None:
-        data_par_an["N-2"] = df_N2
-    
-    # Contrôle automatique de cohérence de la balance
-    st.subheader("Contrôle de cohérence de la balance")
-    if not data_par_an:
-        st.info("Aucun fichier n'a été chargé pour le moment.")
-    else:
-        def controle_coherence(df):
-            # Identification des colonnes pour comptes, débit, crédit, ou montant
-            cols = [c.lower() for c in df.columns]
-            col_compte = None
-            for c in ['compte', 'comptenum', 'account']:
-                if c in cols:
-                    col_compte = df.columns[cols.index(c)]
-                    break
-            col_debit = None
-            col_credit = None
-            for c in ['debit', 'débit']:
-                if c in cols:
-                    col_debit = df.columns[cols.index(c)]
-                    break
-            for c in ['credit', 'crédit']:
-                if c in cols:
-                    col_credit = df.columns[cols.index(c)]
-                    break
-            col_montant = None
-            if col_debit is None or col_credit is None:
-                for c in ['montant', 'amount', 'balance', 'solde']:
-                    if c in cols:
-                        col_montant = df.columns[cols.index(c)]
-                        break
-            # Calcul des totaux pour classes 1-5 et 6-7
-            sum_1to5 = 0.0
-            sum_6to7 = 0.0
-            if col_compte is None:
-                return None  # format non reconnu
-            if col_montant:
-                # Si une seule colonne montant/solde existe
-                for _, row in df.iterrows():
-                    compte = str(row[col_compte]) if not pd.isna(row[col_compte]) else ''
-                    if compte.strip() == '':
-                        continue
-                    try:
-                        m = float(str(row[col_montant]).replace(',', '.'))
-                    except:
-                        m = 0.0
-                    if compte[0] in ['1', '2', '3', '4', '5']:
-                        sum_1to5 += m
-                    elif compte[0] in ['6', '7']:
-                        sum_6to7 += m
-            else:
-                # Si colonnes Débit/Crédit distinctes
-                for _, row in df.iterrows():
-                    compte = str(row[col_compte]) if not pd.isna(row[col_compte]) else ''
-                    if compte.strip() == '':
-                        continue
-                    # Valeurs débit/crédit (0 si NaN)
-                    debit_val = 0.0
-                    credit_val = 0.0
-                    if col_debit:
-                        val = row[col_debit]
-                        if not pd.isna(val):
-                            try:
-                                debit_val = float(str(val).replace(',', '.'))
-                            except:
-                                debit_val = 0.0
-                    if col_credit:
-                        val = row[col_credit]
-                        if not pd.isna(val):
-                            try:
-                                credit_val = float(str(val).replace(',', '.'))
-                            except:
-                                credit_val = 0.0
-                    montant = debit_val - credit_val
-                    if compte[0] in ['1', '2', '3', '4', '5']:
-                        sum_1to5 += montant
-                    elif compte[0] in ['6', '7']:
-                        sum_6to7 += montant
-            ecart = sum_6to7 + sum_1to5
-            return ecart
-        
-        # Vérifier chaque année disponible
-        for year in ["N", "N-1", "N-2"]:
-            if year in data_par_an:
-                df = data_par_an[year]
-                ecart = controle_coherence(df)
-                if ecart is None:
-                    st.warning(f"Exercice {year} : impossible de vérifier la cohérence (format de données non reconnu).")
-                else:
-                    if abs(ecart) < 1e-6:
-                        st.success(f"Exercice {year} : Balance équilibrée (aucun écart).")
-                    else:
-                        st.error(f"Exercice {year} : Écart détecté de {ecart:,.2f} € (comptes 6-7 vs 1-5).")
-            else:
-                st.info(f"Exercice {year} : fichier non fourni.")
 
-with onglet2:
-    st.header("Soldes Intermédiaires de Gestion (SIG)")
-    if not data_par_an:
-        st.info("Aucune donnée disponible. Veuillez charger des fichiers dans l'onglet précédent.")
-    else:
-        def calculer_SIG(df):
-            # Préparation des colonnes
-            cols = [c.lower() for c in df.columns]
-            col_compte = None
-            for c in ['compte', 'comptenum', 'account']:
-                if c in cols:
-                    col_compte = df.columns[cols.index(c)]
-                    break
-            col_debit = None
-            col_credit = None
-            for c in ['debit', 'débit']:
-                if c in cols:
-                    col_debit = df.columns[cols.index(c)]
-                    break
-            for c in ['credit', 'crédit']:
-                if c in cols:
-                    col_credit = df.columns[cols.index(c)]
-                    break
-            col_montant = None
-            if col_debit is None or col_credit is None:
-                for c in ['montant', 'amount', 'balance', 'solde']:
-                    if c in cols:
-                        col_montant = df.columns[cols.index(c)]
-                        break
-            # Calcul des soldes par compte
-            comptes_sommes = {}
-            for _, row in df.iterrows():
-                if col_compte is None:
-                    continue
-                compte = str(row[col_compte]) if not pd.isna(row[col_compte]) else ''
-                if compte.strip() == '':
-                    continue
-                # Montant de la ligne (débit - crédit, ou solde direct)
-                if col_montant:
-                    try:
-                        m = float(str(row[col_montant]).replace(',', '.'))
-                    except:
-                        m = 0.0
+        if col_debit is None:
+            df["_Debit"] = 0.0
+            col_debit = "_Debit"
+        if col_credit is None:
+            df["_Credit"] = 0.0
+            col_credit = "_Credit"
+
+        sum_1to5 = 0.0
+        sum_6to7 = 0.0
+
+        for _, row in df.iterrows():
+            compte = str(row[col_compte]).strip()
+            if compte == "":
+                continue
+            debit_val = to_float(row[col_debit])
+            credit_val = to_float(row[col_credit])
+            m = debit_val - credit_val
+            if compte[0] in "12345":
+                sum_1to5 += m
+            elif compte[0] in "67":
+                sum_6to7 += m
+
+        ecart = sum_6to7 + sum_1to5
+        return ecart
+
+    for annee in ["N", "N-1", "N-2"]:
+        if annee in data_par_an:
+            df = data_par_an[annee]
+            ecart = controle_coherence(df)
+            if ecart is None:
+                st.warning(f"Exercice {annee} : format de données non reconnu pour le contrôle.")
+            else:
+                if abs(ecart) < 1e-2:
+                    st.success(f"Exercice {annee} : balance cohérente (écart ≈ 0 €).")
                 else:
-                    debit_val = 0.0
-                    credit_val = 0.0
-                    if col_debit:
-                        val = row[col_debit]
-                        if not pd.isna(val):
-                            try:
-                                debit_val = float(str(val).replace(',', '.'))
-                            except:
-                                debit_val = 0.0
-                    if col_credit:
-                        val = row[col_credit]
-                        if not pd.isna(val):
-                            try:
-                                credit_val = float(str(val).replace(',', '.'))
-                            except:
-                                credit_val = 0.0
-                    m = debit_val - credit_val
-                comptes_sommes[compte] = comptes_sommes.get(compte, 0.0) + m
-            # Calcul des soldes intermédiaires de gestion
-            # Marge commerciale = ventes de marchandises - coût d'achat des marchandises vendues
-            ventes_marchandises = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("707"))
-            rabais_ventes_marchandises = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("7097"))
-            ventes_net_marchandises = ventes_marchandises + rabais_ventes_marchandises
-            achats_marchandises = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("607"))
-            frais_achats_marchandises = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("608")) if achats_marchandises != 0 else 0.0
-            variation_stocks_marchandises = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("6037"))
-            rabais_achats_marchandises = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("6097"))
-            cout_achats_marchandises = achats_marchandises + frais_achats_marchandises + variation_stocks_marchandises + rabais_achats_marchandises
-            marge_commerciale = -ventes_net_marchandises - cout_achats_marchandises
-            # Production de l'exercice = ventes de produits (biens et services) + production stockée + production immobilisée
-            ventes_produits = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("70") and not str(acct).startswith("707"))
-            # Retirer les rabais sur ventes de marchandises éventuellement inclus (7097)
-            ventes_produits -= rabais_ventes_marchandises
-            variation_stocks_produits = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("71"))
-            production_immobilisee = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("72"))
-            production_exercice = -(ventes_produits + variation_stocks_produits + production_immobilisee)
-            # Consommations en provenance de tiers = achats de matières et approvisionnements + services extérieurs
-            consommations_matieres = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("60") and not str(acct).startswith("607"))
-            # Exclure la variation de stocks de marchandises et les rabais fournisseurs déjà pris en compte
-            consommations_matieres -= variation_stocks_marchandises
-            consommations_matieres -= rabais_achats_marchandises
-            # Exclure les frais d'achats de marchandises si déjà comptabilisés dans la marge
-            if achats_marchandises != 0:
-                consommations_matieres -= sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("608"))
-            services_exterieurs = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("61") or str(acct).startswith("62"))
-            conso_tiers = consommations_matieres + services_exterieurs
-            valeur_ajoutee = marge_commerciale + production_exercice - conso_tiers
-            # Excédent Brut d'Exploitation (EBE) = Valeur ajoutée + subventions d'exploitation - charges de personnel - impôts et taxes
-            subventions = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("74"))
-            charges_personnel = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("64"))
-            impots_taxes = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("63"))
-            ebe = valeur_ajoutee - charges_personnel - impots_taxes + (-subventions)
-            # Résultat d'exploitation = EBE + autres produits d'exploitation - autres charges d'exploitation
-            autres_prod_expl = sum(val for acct, val in comptes_sommes.items() 
-                                   if str(acct).startswith("75") or str(acct).startswith("791") or 
-                                   (str(acct).startswith("78") and not (str(acct).startswith("786") or str(acct).startswith("787"))))
-            autres_charges_expl = sum(val for acct, val in comptes_sommes.items() 
-                                      if str(acct).startswith("65") or 
-                                      (str(acct).startswith("68") and not (str(acct).startswith("686") or str(acct).startswith("687"))))
-            resultat_exploitation = ebe + (-autres_prod_expl) - autres_charges_expl
-            # Résultat financier = produits financiers - charges financières
-            produits_financiers = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("76"))
-            charges_financieres = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("66"))
-            resultat_financier = -produits_financiers - charges_financieres
-            # Résultat exceptionnel = produits exceptionnels - charges exceptionnelles
-            produits_exceptionnels = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("77"))
-            charges_exceptionnelles = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("67"))
-            resultat_exceptionnel = -produits_exceptionnels - charges_exceptionnelles
-            # Résultat courant avant impôts et résultat net
-            resultat_courant = resultat_exploitation + resultat_financier
-            resultat_avant_impot = resultat_courant + resultat_exceptionnel
-            impot_benef = sum(val for acct, val in comptes_sommes.items() if str(acct).startswith("69"))
-            resultat_net = resultat_avant_impot - impot_benef
-            # Indicateurs de présence de données pour marge et production
-            has_merch = any(str(acct).startswith("707") or str(acct).startswith("607") for acct in comptes_sommes.keys())
-            has_prod = any((str(acct).startswith("70") and not str(acct).startswith("707")) or str(acct).startswith("71") or str(acct).startswith("72") 
-                           for acct in comptes_sommes.keys())
-            return {
-                "Marge commerciale": marge_commerciale,
-                "Production de l'exercice": production_exercice,
-                "Valeur ajoutée": valeur_ajoutee,
-                "Excédent Brut d'Exploitation (EBE)": ebe,
-                "Résultat d'exploitation": resultat_exploitation,
-                "Résultat financier": resultat_financier,
-                "Résultat courant avant impôts": resultat_courant,
-                "Résultat exceptionnel": resultat_exceptionnel,
-                "Résultat net": resultat_net,
-                "_has_merch": has_merch,
-                "_has_prod": has_prod
-            }
-        
-        # Affichage du SIG pour chaque exercice disponible
-        for year in ["N", "N-1", "N-2"]:
-            if year in data_par_an:
-                st.subheader(f"Exercice {year}")
-                sig = calculer_SIG(data_par_an[year])
-                has_merch = sig.get("_has_merch", False)
-                has_prod = sig.get("_has_prod", False)
-                # Retirer les clés internes du dictionnaire
-                sig.pop("_has_merch", None)
-                sig.pop("_has_prod", None)
-                # Retirer l'affichage de la marge ou de la production si non applicable
-                if not has_merch and "Marge commerciale" in sig:
-                    sig.pop("Marge commerciale")
-                if not has_prod and "Production de l'exercice" in sig:
-                    sig.pop("Production de l'exercice")
-                # Afficher chaque ligne calculée du SIG
-                for libelle, valeur in sig.items():
-                    st.write(f"- **{libelle} :** {valeur:,.2f} €")
+                    st.error(f"Exercice {annee} : écart 6-7 vs 1-5 = {fmt(ecart)}.")
+        else:
+            st.info(f"Exercice {annee} : pas de fichier chargé.")
+
+
+# -----------------------------
+# PAGE 2 : ANALYSE SIG
+# -----------------------------
+elif page == "Analyse SIG":
+    st.header("Analyse du résultat de l'exercice (SIG)")
+
+    data_par_an = st.session_state["data_par_an"]
+    if "N" not in data_par_an and "N-1" not in data_par_an:
+        st.info("Veuillez d'abord importer au moins un FEC dans la page précédente.")
+    else:
+        # On prépare grouped + SIG pour N et N-1 si dispo
+        sig_par_an = {}
+        grouped_par_an = {}
+        for annee in ["N", "N-1"]:
+            if annee in data_par_an:
+                grouped = preparer_grouped(data_par_an[annee])
+                if grouped is not None:
+                    grouped_par_an[annee] = grouped
+                    sig_par_an[annee] = calcul_sig(grouped)
+
+        if not sig_par_an:
+            st.warning("Impossible de calculer le SIG (format de données non reconnu).")
+        else:
+            lignes_ordre = [
+                "Chiffre d'affaires",
+                "Ventes + Production réelle",
+                "Achats consommés",
+                "Marge globale",
+                "Charges de fonctionnement",
+                "Valeur ajoutée",
+                "Subvention de l'exploitation",
+                "Impôts et taxes",
+                "Charges de personnel",
+                "Excédent brut d'exploitation",
+                "Transfert de charges",
+                "Reprises sur provisions",
+                "Autres produits d'exploitation",
+                "Dotations aux amortissements",
+                "Dotations aux provisions",
+                "Autres charges d'exploitation",
+                "Résultat d'exploitation",
+                "Résultat financier",
+                "Résultat courant",
+                "Résultat exceptionnel",
+                "Résultat de l'exercice",
+                "Capacité d'autofinancement",
+            ]
+
+            # Construction du tableau SIG type "2025 / 2024 / Evolution"
+            data_table = []
+            for ligne in lignes_ordre:
+                val_N = sig_par_an.get("N", {}).get(ligne, 0.0)
+                val_N1 = sig_par_an.get("N-1", {}).get(ligne, 0.0)
+                if "N" in sig_par_an and "N-1" in sig_par_an:
+                    ecart_abs = val_N - val_N1
+                    ecart_pct = (ecart_abs / val_N1 * 100) if abs(val_N1) > 1e-6 else None
+                else:
+                    ecart_abs = None
+                    ecart_pct = None
+                data_table.append(
+                    {
+                        "Poste": ligne,
+                        "N": val_N if "N" in sig_par_an else None,
+                        "N-1": val_N1 if "N-1" in sig_par_an else None,
+                        "Écart": ecart_abs,
+                        "%": ecart_pct,
+                    }
+                )
+
+            df_sig = pd.DataFrame(data_table)
+
+            # Affichage en tableau large
+            def fmt_cell(v):
+                if v is None or pd.isna(v):
+                    return ""
+                return fmt(v)
+
+            def fmt_pct(v):
+                if v is None or pd.isna(v):
+                    return ""
+                return f"{v:,.1f} %".replace(",", ",")
+
+            df_aff = df_sig.copy()
+            if "N" in sig_par_an:
+                df_aff["N"] = df_aff["N"].apply(fmt_cell)
+            if "N-1" in sig_par_an:
+                df_aff["N-1"] = df_aff["N-1"].apply(fmt_cell)
+            df_aff["Écart"] = df_aff["Écart"].apply(fmt_cell)
+            df_aff["%"] = df_aff["%"].apply(fmt_pct)
+
+            st.subheader("Tableau des soldes intermédiaires de gestion")
+            st.dataframe(df_aff.set_index("Poste"), use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("Détail par poste (cliquer pour dérouler)")
+
+            # Volets déroulants pour chaque ligne
+            for _, row in df_sig.iterrows():
+                poste = row["Poste"]
+                with st.expander(poste):
+                    cols = st.columns(2)
+                    if "N" in grouped_par_an:
+                        detail_N = filtre_detail(grouped_par_an["N"], poste)
+                        cols[0].markdown("**Exercice N**")
+                        if detail_N.empty:
+                            cols[0].write("Aucun compte pour ce poste.")
+                        else:
+                            cols[0].dataframe(detail_N, use_container_width=True)
+                    if "N-1" in grouped_par_an:
+                        detail_N1 = filtre_detail(grouped_par_an["N-1"], poste)
+                        cols[1].markdown("**Exercice N-1**")
+                        if detail_N1.empty:
+                            cols[1].write("Aucun compte pour ce poste.")
+                        else:
+                            cols[1].dataframe(detail_N1, use_container_width=True)
