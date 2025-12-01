@@ -6,8 +6,9 @@ import time
 # --- Configuration de la Page ---
 st.set_page_config(page_title="BI+ – Analyse FEC & SIG", layout="centered")
 
-# --- 1. FONCTION DE RECHERCHE D'API SIRENE ---
+# --- 1. FONCTION DE RECHERCHE D'API SIRENE (CORRIGÉE) ---
 
+# URL de l'API OpenDataSoft (pas de changement ici)
 API_URL = "https://public.opendatasoft.com/api/records/1.0/search/"
 
 def rechercher_info_siren(siren):
@@ -22,7 +23,8 @@ def rechercher_info_siren(siren):
         return None, "Format SIREN invalide (doit être 9 chiffres)."
 
     params = {
-        "dataset": "sirene_v3",
+        # CHANGEMENT CRUCIAL ICI : UTILISATION DU DATASET ACTUEL
+        "dataset": "sirene-open-data", 
         "q": f"siren:{siren}",
         "rows": 1
     }
@@ -38,6 +40,8 @@ def rechercher_info_siren(siren):
         if data and data['nhits'] > 0:
             record = data['records'][0]['fields']
             
+            # --- Les champs de l'API changent légèrement avec ce nouveau dataset ---
+            # Extraction des champs
             nom_entreprise = record.get('denomination') or record.get('nom_usage')
             
             prenom = record.get('prenom_usuel', '')
@@ -46,6 +50,7 @@ def rechercher_info_siren(siren):
 
             adresse = record.get('adresse_ligne_1')
             ville_cp = f"{record.get('code_postal')} {record.get('libelle_commune')}"
+            # --- Fin des ajustements de champs ---
             
             return {
                 "siren": siren,
@@ -58,10 +63,9 @@ def rechercher_info_siren(siren):
             return None, "SIREN non trouvé dans la base de données publique."
             
     except requests.exceptions.HTTPError as e:
-        return None, f"Erreur HTTP: {e.response.status_code}. Problème côté API."
+        return None, f"Erreur HTTP: {e.response.status_code}. Vérifiez le nom du dataset ou l'URL."
     except requests.exceptions.RequestException:
         return None, "Erreur de connexion à l'API Sirene. Vérifiez votre réseau."
-
 
 # --- 2. FONCTION PRINCIPALE DE LA PAGE D'ACCUEIL ---
 
