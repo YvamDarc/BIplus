@@ -1,25 +1,45 @@
 import streamlit as st
+import os
 
 st.set_page_config(page_title="BI+ FEC & SIG", layout="wide")
 
-st.title("BI+ – Tableau de bord FEC & SIG")
-st.markdown("""
-Bienvenue dans votre application d'analyse comptable basée sur le **FEC**.
+# -----------------------------
+# Sidebar (barre verticale)
+# -----------------------------
+st.sidebar.title("📊 BI+ – Navigation")
 
-Choisissez ce que vous souhaitez faire :
-""")
+page = st.sidebar.radio(
+    "Sélectionner une page :",
+    ["Accueil", "Données & imports", "Analyse SIG"]
+)
 
-st.write("### 🚀 Navigation")
+# -----------------------------
+# ROUTEUR DE PAGES
+# -----------------------------
 
-col1, col2 = st.columns(2)
+if page == "Accueil":
+    st.title("BI+ – Tableau de bord FEC & SIG")
 
-with col1:
-    if st.button("📥 Aller aux données & imports"):
-        st.switch_page("pages/1_Donnees_imports.py")
+    st.markdown("""
+    Bienvenue dans votre application d'analyse comptable basée sur le **FEC**.
 
-with col2:
-    if st.button("📊 Aller à l'analyse SIG"):
-        st.switch_page("pages/2_Analyse_SIG.py")
+    Utilisez le menu vertical à gauche pour accéder aux pages :
+    - 📥 Données & imports  
+    - 📊 Analyse SIG  
+    """)
 
-st.markdown("---")
-st.info("Vous pouvez aussi utiliser le menu de navigation dans la barre latérale.")
+    st.info("👉 Choisissez une page dans la barre latérale à gauche.")
+
+else:
+    # Fichiers des sous-pages
+    page_files = {
+        "Données & imports": "pages/Donnees_imports.py",
+        "Analyse SIG": "pages/Analyse_SIG.py"
+    }
+
+    page_path = page_files[page]
+
+    # Charge et exécute le fichier Python de la page sélectionnée
+    with open(page_path, "r", encoding="utf-8") as f:
+        code = f.read()
+        exec(code, globals())
