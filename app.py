@@ -1,13 +1,14 @@
 import streamlit as st
 import requests
 import pandas as pd
+import time # Import ajouté pour simuler un chargement plus long
 
 # --- Configuration de la Page ---
 st.set_page_config(page_title="BI+ – Analyse FEC & SIG", layout="centered")
 
 # --- 1. FONCTION DE RECHERCHE D'API SIRENE ---
 
-# URL de l'API Sirene Open Data (souvent suffisante et sans clé API)
+# URL de l'API Sirene Open Data
 API_URL = "https://public.opendatasoft.com/api/records/1.0/search/"
 
 def rechercher_info_siren(siren):
@@ -15,7 +16,7 @@ def rechercher_info_siren(siren):
     Interroge l'API pour récupérer les informations de l'entreprise (Nom, Dirigeant, Adresse).
     """
     
-    # Normalisation du SIREN (ne prend que les 9 premiers chiffres si SIRET)
+    # Normalisation du SIREN
     if len(siren) == 14:
         siren = siren[:9]
         
@@ -28,15 +29,18 @@ def rechercher_info_siren(siren):
         "rows": 1
     }
     
+    # Simulation d'un délai pour bien voir le spinner fonctionner
+    time.sleep(1.5) 
+
     try:
-        response = requests.get(API_URL, params=params, timeout=10) # Ajout d'un timeout
+        response = requests.get(API_URL, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
         
         if data and data['nhits'] > 0:
             record = data['records'][0]['fields']
             
-            # Extraction et nettoyage des champs
+            # Extraction des champs
             nom_entreprise = record.get('denomination') or record.get('nom_usage')
             
             prenom = record.get('prenom_usuel', '')
@@ -46,7 +50,6 @@ def rechercher_info_siren(siren):
             adresse = record.get('adresse_ligne_1')
             ville_cp = f"{record.get('code_postal')} {record.get('libelle_commune')}"
             
-            # Stockage des données pour l'édition
             return {
                 "siren": siren,
                 "nom_entreprise": nom_entreprise or "Nom inconnu",
@@ -60,7 +63,6 @@ def rechercher_info_siren(siren):
     except requests.exceptions.HTTPError as e:
         return None, f"Erreur HTTP: {e.response.status_code}. Problème côté API."
     except requests.exceptions.RequestException:
-        # Erreur de connexion (Timeout, DNS, etc.)
         return None, "Erreur de connexion à l'API Sirene. Vérifiez votre réseau."
 
 
@@ -85,12 +87,13 @@ def cover_page():
         "Saisir SIREN (9) ou SIRET (14)",
         value=st.session_state['info_entreprise']['siren'],
         max_chars=14,
-        key="siren_key" # Utilisation d'une clé pour éviter les conflits
+        key="siren_key"
     )
     
     # Bouton de recherche
     if st.sidebar.button("Rechercher dans Data.gouv"):
-        with st.sidebar.spinner("Recherche en cours..."):
+        # --- CORRECTION DE L'ERREUR ICI : st.spinner au lieu de st.sidebar.spinner ---
+        with st.spinner("Recherche en cours..."): 
             info, statut = rechercher_info_siren(siren_input.strip())
             
             if statut == "OK":
@@ -128,18 +131,19 @@ def cover_page():
             key="edit_dirigeant"
         )
         
-        st.session_state['info_entreprise']['adresse'] = st.text_area(
+        # On affiche l'adresse et le CP dans un seul champ d'édition
+        adresse_complete = f"{st.session_state['info_entreprise']['adresse']} {st.session_state['info_entreprise']['ville_cp']}".strip()
+        st.session_state['info_entreprise']['adresse_complete'] = st.text_area(
             "Adresse complète :", 
-            value=f"{st.session_state['info_entreprise']['adresse']} {st.session_state['info_entreprise']['ville_cp']}",
+            value=adresse_complete,
             key="edit_adresse"
         )
         
         # Bouton de soumission du formulaire d'édition
         if st.form_submit_button("Sauvegarder les modifications"):
-            # Les modifications sont déjà dans st.session_state grâce aux clés (key="edit_...")
             st.success("Informations de l'entreprise mises à jour en session.")
 
-    # 4. Bloc d'information et d'import (tel que vous l'aviez)
+    # 4. Bloc d'information et d'import
     st.markdown("---")
     st.markdown(
         """
@@ -158,7 +162,7 @@ def cover_page():
     # Zone d'import de fichiers FEC (non implémentée ici, juste l'interface)
     st.markdown("### 📥 Importer les Fichiers Comptables")
     fichier_n = st.file_uploader("Importer le FEC Année N", type=['txt', 'csv'])
-    fichier_n_1 = st.file_uploader("Importer le FEC Année N-1 (Optionnel)", type=['txt', 'csv'])
+    fichier_n_1 = st.fileploader("Importer le FEC Année N-1 (Optionnel)", type=['txt', 'csv'])
 
 
 if __name__ == "__main__":
