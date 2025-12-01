@@ -1,14 +1,13 @@
 import streamlit as st
 import requests
 import pandas as pd
-import time # Import ajouté pour simuler un chargement plus long
+import time 
 
 # --- Configuration de la Page ---
 st.set_page_config(page_title="BI+ – Analyse FEC & SIG", layout="centered")
 
 # --- 1. FONCTION DE RECHERCHE D'API SIRENE ---
 
-# URL de l'API Sirene Open Data
 API_URL = "https://public.opendatasoft.com/api/records/1.0/search/"
 
 def rechercher_info_siren(siren):
@@ -16,7 +15,6 @@ def rechercher_info_siren(siren):
     Interroge l'API pour récupérer les informations de l'entreprise (Nom, Dirigeant, Adresse).
     """
     
-    # Normalisation du SIREN
     if len(siren) == 14:
         siren = siren[:9]
         
@@ -29,7 +27,7 @@ def rechercher_info_siren(siren):
         "rows": 1
     }
     
-    # Simulation d'un délai pour bien voir le spinner fonctionner
+    # Simulation d'un délai pour l'effet spinner
     time.sleep(1.5) 
 
     try:
@@ -40,7 +38,6 @@ def rechercher_info_siren(siren):
         if data and data['nhits'] > 0:
             record = data['records'][0]['fields']
             
-            # Extraction des champs
             nom_entreprise = record.get('denomination') or record.get('nom_usage')
             
             prenom = record.get('prenom_usuel', '')
@@ -92,7 +89,7 @@ def cover_page():
     
     # Bouton de recherche
     if st.sidebar.button("Rechercher dans Data.gouv"):
-        # --- CORRECTION DE L'ERREUR ICI : st.spinner au lieu de st.sidebar.spinner ---
+        # Le spinner est global, pas st.sidebar.spinner
         with st.spinner("Recherche en cours..."): 
             info, statut = rechercher_info_siren(siren_input.strip())
             
@@ -106,7 +103,6 @@ def cover_page():
     
     st.title("📘 Bienvenue dans l'application BI+ FEC & SIG")
     
-    # Affichage personnalisé après la recherche/l'édition
     nom_affichee = st.session_state['info_entreprise']['nom_entreprise']
     dirigeant_affiche = st.session_state['info_entreprise']['dirigeant']
     
@@ -115,10 +111,8 @@ def cover_page():
 
     st.subheader("Informations de l'entreprise (Modifiables si API incorrecte)")
     
-    # Utilisation d'un formulaire pour regrouper les champs d'édition
     with st.form("formulaire_edition_info", clear_on_submit=False):
         
-        # Le contenu du st.session_state est mis à jour directement via les keys
         st.session_state['info_entreprise']['nom_entreprise'] = st.text_input(
             "Nom de l'entreprise :", 
             value=st.session_state['info_entreprise']['nom_entreprise'],
@@ -131,7 +125,6 @@ def cover_page():
             key="edit_dirigeant"
         )
         
-        # On affiche l'adresse et le CP dans un seul champ d'édition
         adresse_complete = f"{st.session_state['info_entreprise']['adresse']} {st.session_state['info_entreprise']['ville_cp']}".strip()
         st.session_state['info_entreprise']['adresse_complete'] = st.text_area(
             "Adresse complète :", 
@@ -139,7 +132,6 @@ def cover_page():
             key="edit_adresse"
         )
         
-        # Bouton de soumission du formulaire d'édition
         if st.form_submit_button("Sauvegarder les modifications"):
             st.success("Informations de l'entreprise mises à jour en session.")
 
@@ -159,10 +151,10 @@ def cover_page():
         """
     )
     
-    # Zone d'import de fichiers FEC (non implémentée ici, juste l'interface)
     st.markdown("### 📥 Importer les Fichiers Comptables")
     fichier_n = st.file_uploader("Importer le FEC Année N", type=['txt', 'csv'])
-    fichier_n_1 = st.fileploader("Importer le FEC Année N-1 (Optionnel)", type=['txt', 'csv'])
+    # Ligne corrigée ci-dessous
+    fichier_n_1 = st.file_uploader("Importer le FEC Année N-1 (Optionnel)", type=['txt', 'csv'])
 
 
 if __name__ == "__main__":
