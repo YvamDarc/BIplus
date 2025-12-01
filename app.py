@@ -1,162 +1,72 @@
-import streamlit as st
-import requests
-import pandas as pd
-import time 
-
-# --- Configuration de la Page ---
-st.set_page_config(page_title="BI+ – Analyse FEC & SIG", layout="centered")
-
-# --- 1. FONCTION DE RECHERCHE D'API SIRENE (CORRIGÉE) ---
-
-# URL de l'API OpenDataSoft (pas de changement ici)
-API_URL = "https://public.opendatasoft.com/api/records/1.0/search/"
+API_SIRENE_ENTREPRISE = "https://entreprise.data.gouv.fr/api/sirene/v3/unites_legales/"
 
 def rechercher_info_siren(siren):
     """
-    Interroge l'API pour récupérer les informations de l'entreprise (Nom, Dirigeant, Adresse).
+    Interroge l'API Sirene officielle pour récupérer les informations de l'entreprise (Nom, Dirigeant, Adresse).
+    Accepte SIREN (9) ou SIRET (14) et tronque en SIREN si besoin.
     """
-    
-    if len(siren) == 14:
+
+    # Normalisation : si SIRET (14 chiffres), on tronque les 9 premiers
+    siren = siren.strip()
+    if len(siren) == 14 and siren.isdigit():
         siren = siren[:9]
-        
+
+    # Vérification du format
     if len(siren) != 9 or not siren.isdigit():
         return None, "Format SIREN invalide (doit être 9 chiffres)."
 
-    params = {
-        # TENTATIVE CRUCIALE : Changement du nom du dataset
-        "dataset": "sirene-open-data-insee", 
-        "q": f"siren:{siren}",
-        "rows": 1
-    }
-    
-    # Simulation d'un délai pour l'effet spinner
-    time.sleep(1.5) 
+    url = API_SIRENE_ENTREPRISE + siren
 
     try:
-        response = requests.get(API_URL, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data and data['nhits'] > 0:
-            record = data['records'][0]['fields']
-            
-            # Les champs devraient rester les mêmes avec cette version
-            nom_entreprise = record.get('denomination') or record.get('nom_usage')
-            
-            prenom = record.get('prenom_usuel', '')
-            nom = record.get('nom_usage', '')
-            dirigeant = f"{prenom} {nom}".strip() or "Non spécifié"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 404:
+            return None, "SIREN non trouvé dans la base Sirene."
+        r.raise_for_status()
+        data = r.json()
 
-            adresse = record.get('adresse_ligne_1')
-            ville_cp = f"{record.get('code_postal')} {record.get('libelle_commune')}"
-            
-            return {
-                "siren": siren,
-                "nom_entreprise": nom_entreprise or "Nom inconnu",
-                "dirigeant": dirigeant,
-                "adresse": adresse or "Adresse inconnue",
-                "ville_cp": ville_cp or ""
-            }, "OK"
-        else:
-            return None, "SIREN non trouvé dans la base de données publique."
-            
+        unite = data.get("unite_legale", {})
+
+        # Nom de l'entreprise
+        nom_entreprise = (
+            unite.get("denomination")
+            or unite.get("denomination_usuelle_1")
+            or unite.get("denomination_usuelle_2")
+            or unite.get("denomination_usuelle_3")
+            or "Nom inconnu"
+        )
+
+        # Dirigeant : la vraie info dirigeant n'est pas directement accessible ici,
+        # donc on met un placeholder ou on reconstruit à partir du nom / prénom si personne physique.
+        prenom = unite.get("prenom_usuel") or ""
+        nom = unite.get("nom_usage") or unite.get("nom") or ""
+        dirigeant = (prenom + " " + nom).strip() or "Dirigeant non disponible via l'API"
+
+        # Adresse : les adresses sont dans les périodes
+        periodes = unite.get("periodes_unite_legale", [])
+        adresse = ""
+        ville_cp = ""
+
+        if periodes:
+            derniere = periodes[0]  # en général la première est la plus récente
+            voie = derniere.get("libelle_voie") or ""
+            numero_voie = derniere.get("numero_voie") or ""
+            cp = derniere.get("code_postal") or ""
+            commune = derniere.get("libelle_commune") or ""
+
+            adresse = f"{numero_voie} {voie}".strip()
+            ville_cp = f"{cp} {commune}".strip()
+
+        return {
+            "siren": siren,
+            "nom_entreprise": nom_entreprise,
+            "dirigeant": dirigeant,
+            "adresse": adresse or "Adresse inconnue",
+            "ville_cp": ville_cp or "",
+        }, "OK"
+
     except requests.exceptions.HTTPError as e:
-        return None, f"Erreur HTTP: {e.response.status_code}. Vérifiez le nom du dataset ou l'URL."
+        return None, f"Erreur HTTP: {e.response.status_code} lors de l'appel à l'API Sirene."
     except requests.exceptions.RequestException:
         return None, "Erreur de connexion à l'API Sirene. Vérifiez votre réseau."
-# --- 2. FONCTION PRINCIPALE DE LA PAGE D'ACCUEIL ---
-
-def cover_page():
-
-    # 1. INITIALISATION DES DONNÉES DE L'ENTREPRISE (Session State)
-    if 'info_entreprise' not in st.session_state:
-        st.session_state['info_entreprise'] = {
-            "siren": "",
-            "nom_entreprise": "NOM À DÉFINIR",
-            "dirigeant": "DIRIGEANT À DÉFINIR",
-            "adresse": "",
-            "ville_cp": ""
-        }
-    
-    # 2. COLONNE LATÉRALE : RECHERCHE SIREN
-    st.sidebar.header("🔍 Infos Entreprise & SIREN")
-    
-    siren_input = st.sidebar.text_input(
-        "Saisir SIREN (9) ou SIRET (14)",
-        value=st.session_state['info_entreprise']['siren'],
-        max_chars=14,
-        key="siren_key"
-    )
-    
-    # Bouton de recherche
-    if st.sidebar.button("Rechercher dans Data.gouv"):
-        # Le spinner est global, pas st.sidebar.spinner
-        with st.spinner("Recherche en cours..."): 
-            info, statut = rechercher_info_siren(siren_input.strip())
-            
-            if statut == "OK":
-                st.session_state['info_entreprise'] = info
-                st.sidebar.success("Informations de l'entreprise trouvées et chargées.")
-            else:
-                st.sidebar.error(statut)
-
-    # 3. CONTENU PRINCIPAL : TITRE ET ÉDITION DES DONNÉES
-    
-    st.title("📘 Bienvenue dans l'application BI+ FEC & SIG")
-    
-    nom_affichee = st.session_state['info_entreprise']['nom_entreprise']
-    dirigeant_affiche = st.session_state['info_entreprise']['dirigeant']
-    
-    st.markdown(f"## 💼 Société : **{nom_affichee}**")
-    st.markdown(f"### 👋 Utilisateur (Dirigeant) : **{dirigeant_affiche}**")
-
-    st.subheader("Informations de l'entreprise (Modifiables si API incorrecte)")
-    
-    with st.form("formulaire_edition_info", clear_on_submit=False):
-        
-        st.session_state['info_entreprise']['nom_entreprise'] = st.text_input(
-            "Nom de l'entreprise :", 
-            value=st.session_state['info_entreprise']['nom_entreprise'],
-            key="edit_nom"
-        )
-        
-        st.session_state['info_entreprise']['dirigeant'] = st.text_input(
-            "Nom du Dirigeant :", 
-            value=st.session_state['info_entreprise']['dirigeant'],
-            key="edit_dirigeant"
-        )
-        
-        adresse_complete = f"{st.session_state['info_entreprise']['adresse']} {st.session_state['info_entreprise']['ville_cp']}".strip()
-        st.session_state['info_entreprise']['adresse_complete'] = st.text_area(
-            "Adresse complète :", 
-            value=adresse_complete,
-            key="edit_adresse"
-        )
-        
-        if st.form_submit_button("Sauvegarder les modifications"):
-            st.success("Informations de l'entreprise mises à jour en session.")
-
-    # 4. Bloc d'information et d'import
-    st.markdown("---")
-    st.markdown(
-        """
-        Cette application vous permet d'analyser vos données comptables à partir du **Fichier des Écritures Comptables (FEC)**.
-        
-        ### 🌟 Fonctionnalités :
-        - Import des fichiers **FEC** et balances N / N-1 / N-2  
-        - Contrôle automatique de cohérence comptable  
-        - Calcul complet du **SIG** selon les normes du PCG  
-        - Détail cliquable par poste (charges externes, impôts, etc.)  
-        
-        👉 Utilisez le **menu à gauche** pour accéder aux fonctionnalités.
-        """
-    )
-    
-    st.markdown("### 📥 Importer les Fichiers Comptables")
-    fichier_n = st.file_uploader("Importer le FEC Année N", type=['txt', 'csv'])
-    # Ligne corrigée ci-dessous
-    fichier_n_1 = st.file_uploader("Importer le FEC Année N-1 (Optionnel)", type=['txt', 'csv'])
-
-
-if __name__ == "__main__":
-    cover_page()
+    except Exception as e:
+        return None, f"Erreur inattendue lors de la lecture des données Sirene : {e}"
